@@ -1,0 +1,106 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  VIBE_LOG_TYPE: plain
+  LANG: en_US.UTF-8
+  GH_TOKEN: ${{ github.token }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  vibe-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # checkout@v4 leaves no local `main` ref; the actions diff against `main...HEAD`
+      - name: Create local main ref
+        run: git branch main origin/main
+
+      - name: Cache vibe-action
+        id: vibe_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/vibe-action
+          key: vibe-action-${{ runner.os }}-v2
+
+      - name: Install vibe-action
+        if: steps.vibe_cache.outputs.cache-hit != 'true'
+        run: cargo install vibe-action
+
+      - name: Write vibe-action config
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          mkdir -p "$HOME/.vibe-action"
+          cat > "$HOME/.vibe-action/config.yaml" <<EOF
+          version: '0.0.4'
+          action:
+            system: |-
+              You are Vibe Action — a CLI tool, not a chatbot.
+              Work fast. Just do the task.
+              Reasoning models: keep chain of thought extremely brief.
+              Output ONLY the requested result.
+              No explanations, markdown fences, or extra text unless explicitly requested.
+            retries: 2
+          groups:
+            - git: https://github.com/keygenqt/vibe-action-groups.git
+              path: /ci
+              name: ci
+              about: CI checks
+          cluster:
+            - provider: deepseek
+              host: https://api.deepseek.com/v1
+              model: deepseek-v4-flash
+              role: medium
+              timeout_secs: 60
+              temperature: 0.2
+              seed: 42
+              num_ctx: 8192
+              num_predict: 8192
+              api_key: ${DEEPSEEK_API_KEY}
+              parallel: 2
+            - provider: deepseek
+              host: https://api.deepseek.com/v1
+              model: deepseek-v4-flash
+              role: large
+              timeout_secs: 60
+              temperature: 0.2
+              seed: 42
+              num_ctx: 8192
+              num_predict: 8192
+              api_key: ${DEEPSEEK_API_KEY}
+              parallel: 2
+          EOF
+
+      - name: ci checks
+        if: ${{ !cancelled() }}
+        run: |
+          body=$(mktemp)
+          rc=0
+          for check in spdx validate summary; do
+            if vibe-action ci "$check" "$PWD" > out.txt && ! grep -q '^FAIL' out.txt; then
+              status='✅'
+            else
+              status='❌'
+              rc=1
+            fi
+            {
+              echo "### ci $check ${status}"
+              echo '```'
+              cat out.txt
+              echo '```'
+            } >> "$body"
+          done
+          gh pr comment "$PR_NUMBER" --body-file "$body" --edit-last \
+            || gh pr comment "$PR_NUMBER" --body-file "$body"
+          exit $rc
